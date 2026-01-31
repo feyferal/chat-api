@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment variables
+.env
+
+# Database
+app.db
+*.sqlite
+*.sqlite3
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Pytest / cache
+.pytest_cache/
+
+# Mypy
+.mypy_cache/
+
+# Build
+build/
+dist/
+*.egg-info/
+
+# Frontend (if any future assets)
+node_modules/

@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="uk">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Chat UI</title>
+    <style>
+      body { font-family: system-ui, Arial, sans-serif; margin: 0; background: #0b0f17; color: #e8eefc; }
+      .wrap { max-width: 900px; margin: 0 auto; padding: 18px; }
+      .top { display: flex; gap: 10px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+      .card { background: #121a2a; border: 1px solid #22314f; border-radius: 14px; padding: 14px; }
+      button { background: #2b65ff; color: white; border: 0; border-radius: 10px; padding: 10px 12px; cursor: pointer; }
+      button.secondary { background: #22314f; }
+      button:disabled { opacity: 0.6; cursor: not-allowed; }
+      input, select { background: #0e1422; border: 1px solid #22314f; color: #e8eefc; border-radius: 10px; padding: 10px 12px; }
+      .row { display: flex; gap: 10px; width: 100%; }
+      .row > * { flex: 1; }
+      .chat { margin-top: 14px; height: 60vh; overflow: auto; padding: 10px; border-radius: 14px; background: #0e1422; border: 1px solid #22314f; }
+      .msg { max-width: 82%; padding: 10px 12px; border-radius: 12px; margin: 8px 0; white-space: pre-wrap; line-height: 1.35; }
+      .user { margin-left: auto; background: #2b65ff; color: #fff; }
+      .assistant { margin-right: auto; background: #16223a; border: 1px solid #22314f; }
+      .meta { opacity: 0.85; font-size: 12px; }
+      .bar { display: flex; gap: 10px; margin-top: 12px; }
+      .bar input { flex: 1; }
+      .pill { display: inline-flex; gap: 10px; align-items: center; padding: 8px 10px; border-radius: 999px; background: #0e1422; border: 1px solid #22314f; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="top card">
+        <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+          <div class="pill">
+            <div>Session:</div>
+            <div class="mono" id="sessionId">—</div>
+          </div>
+          <div class="pill">
+            <div>Total cost:</div>
+            <div class="mono" id="totalCost">$0</div>
+          </div>
+          <div class="pill">
+            <div>Total tokens:</div>
+            <div class="mono" id="totalTokens">0</div>
+          </div>
+        </div>
+
+        <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+          <select id="model">
+            <option value="gpt-4o-mini">gpt-4o-mini</option>
+            <option value="gpt-4o">gpt-4o</option>
+          </select>
+          <button id="newSessionBtn">New session</button>
+          <button class="secondary" id="refreshBtn">Refresh history</button>
+        </div>
+      </div>
+
+      <div class="chat" id="chat"></div>
+
+      <div class="bar card">
+        <input id="input" placeholder="Напиши повідомлення..." />
+        <button id="sendBtn">Send</button>
+      </div>
+
+      <div class="meta" id="status" style="margin-top:10px;"></div>
+    </div>
+
+    <script>
+      const chatEl = document.getElementById("chat");
+      const inputEl = document.getElementById("input");
+      const sendBtn = document.getElementById("sendBtn");
+      const newSessionBtn = document.getElementById("newSessionBtn");
+      const refreshBtn = document.getElementById("refreshBtn");
+      const sessionIdEl = document.getElementById("sessionId");
+      const totalCostEl = document.getElementById("totalCost");
+      const totalTokensEl = document.getElementById("totalTokens");
+      const statusEl = document.getElementById("status");
+      const modelEl = document.getElementById("model");
+
+      let sessionId = null;
+
+      function setStatus(text) {
+        statusEl.textContent = text || "";
+      }
+
+      function addMessage(role, content) {
+        const div = document.createElement("div");
+        div.className = "msg " + (role === "user" ? "user" : "assistant");
+        div.textContent = content;
+        chatEl.appendChild(div);
+        chatEl.scrollTop = chatEl.scrollHeight;
+      }
+
+      function clearChat() {
+        chatEl.innerHTML = "";
+      }
+
+      async function createSession() {
+        setStatus("Creating session...");
+        const model = modelEl.value;
+        const resp = await fetch("/sessions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model })
+        });
+        if (!resp.ok) throw new Error(await resp.text());
+        const data = await resp.json();
+        sessionId = data.session_id;
+        sessionIdEl.textContent = String(sessionId);
+        totalCostEl.textContent = "$0";
+        totalTokensEl.textContent = "0";
+        clearChat();
+        setStatus("Session created.");
+      }
+
+      async function refreshHistory() {
+        if (!sessionId) return;
+        setStatus("Refreshing history...");
+        const resp = await fetch(`/sessions/${sessionId}`);
+        if (!resp.ok) throw new Error(await resp.text());
+        const data = await resp.json();
+        clearChat();
+        for (const m of data.messages) addMessage(m.role, m.content);
+        totalCostEl.textContent = "$" + String(data.total_cost);
+        totalTokensEl.textContent = String(data.total_tokens);
+        setStatus("History updated.");
+      }
+
+      async function sendMessage() {
+        const text = (inputEl.value || "").trim();
+        if (!text) return;
+        if (!sessionId) await createSession();
+
+        sendBtn.disabled = true;
+        inputEl.disabled = true;
+        setStatus("Sending...");
+
+        addMessage("user", text);
+        inputEl.value = "";
+
+        const model = modelEl.value;
+
+        const resp = await fetch(`/sessions/${sessionId}/messages`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: text, model })
+        });
+
+        sendBtn.disabled = false;
+        inputEl.disabled = false;
+
+        if (!resp.ok) {
+          const err = await resp.text();
+          setStatus("Error: " + err);
+          return;
+        }
+
+        const data = await resp.json();
+        addMessage("assistant", data.assistant_message.content);
+        totalCostEl.textContent = "$" + String(data.session_total_cost);
+        totalTokensEl.textContent = String(data.session_total_tokens);
+        setStatus("Done.");
+      }
+
+      newSessionBtn.addEventListener("click", async () => {
+        try { await createSession(); }
+        catch (e) { setStatus("Error: " + e.message); }
+      });
+
+      refreshBtn.addEventListener("click", async () => {
+        try { await refreshHistory(); }
+        catch (e) { setStatus("Error: " + e.message); }
+      });
+
+      sendBtn.addEventListener("click", async () => {
+        try { await sendMessage(); }
+        catch (e) { setStatus("Error: " + e.message); }
+      });
+
+      inputEl.addEventListener("keydown", async (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          try { await sendMessage(); }
+          catch (err) { setStatus("Error: " + err.message); }
+        }
+      });
+
+      (async () => {
+        try { await createSession(); }
+        catch (e) { setStatus("Error: " + e.message); }
+      })();
+    </script>
+  </body>
+</html>
