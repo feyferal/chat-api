@@ -46,7 +46,14 @@ def send_message(session_id: int, payload: SendMessageRequest, db: Session = Dep
     client = OpenAIClient()
     reply = client.chat(model=model, messages=openai_messages)
 
-    assistant_cost = calc_cost_usd(model=model, prompt_tokens=reply.prompt_tokens, completion_tokens=reply.completion_tokens)
+    try:
+        assistant_cost = calc_cost_usd(
+            model=model,
+            prompt_tokens=reply.prompt_tokens,
+            completion_tokens=reply.completion_tokens,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     assistant_msg = ChatMessage(
         session_id=s.id,
