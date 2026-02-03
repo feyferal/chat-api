@@ -1,17 +1,26 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from ..config import settings
 from ..db import get_db
-from ..models import ChatSession, ChatMessage
+from ..models import ChatMessage, ChatSession
 from ..schemas import (
-    SessionCreateRequest, SessionCreateResponse,
-    SendMessageRequest, SendMessageResponse,
-    SessionHistoryResponse, MessageOut
+    MessageOut,
+    SendMessageRequest,
+    SendMessageResponse,
+    SessionCreateRequest,
+    SessionCreateResponse,
+    SessionHistoryResponse,
+    SessionListItem,
+    SessionListResponse,
 )
-from ..services.openai_client import OpenAIClient
 from ..services.chat_context import build_openai_messages
+from ..services.openai_client import OpenAIClient
 from ..services.pricing import calc_cost_usd
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
@@ -19,7 +28,7 @@ router = APIRouter(prefix="/sessions", tags=["sessions"])
 
 @router.post("", response_model=SessionCreateResponse)
 def create_session(payload: SessionCreateRequest, db: Session = Depends(get_db)):
-    model = payload.model or "gpt-4o-mini"
+    model = payload.model or settings.default_model
     s = ChatSession(model=model)
     db.add(s)
     db.commit()
@@ -40,8 +49,18 @@ def send_message(session_id: int, payload: SendMessageRequest, db: Session = Dep
     db.commit()
     db.refresh(user_msg)
 
-    history = db.query(ChatMessage).filter(ChatMessage.session_id == s.id).order_by(ChatMessage.id.asc()).all()
-    openai_messages = build_openai_messages(history)
+    history = (
+        db.query(ChatMessage)
+        .filter(ChatMessage.session_id == s.id)
+        .order_by(ChatMessage.id.asc())
+        .all()
+    )
+
+    openai_messages = build_openai_messages(
+        history,
+        system_prompt=settings.system_prompt,
+        limit=settings.context_limit,
+    )
 
     client = OpenAIClient()
     reply = client.chat(model=model, messages=openai_messages)
@@ -66,6 +85,8 @@ def send_message(session_id: int, payload: SendMessageRequest, db: Session = Dep
     )
     db.add(assistant_msg)
 
+    # update session totals
+    s.updated_at = datetime.utcnow()
     s.model = model
     s.total_prompt_tokens += reply.prompt_tokens
     s.total_completion_tokens += reply.completion_tokens
@@ -101,7 +122,12 @@ def get_history(session_id: int, db: Session = Depends(get_db)):
     if s is None:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    messages = db.query(ChatMessage).filter(ChatMessage.session_id == s.id).order_by(ChatMessage.id.asc()).all()
+    messages = (
+        db.query(ChatMessage)
+        .filter(ChatMessage.session_id == s.id)
+        .order_by(ChatMessage.id.asc())
+        .all()
+    )
 
     return SessionHistoryResponse(
         session_id=s.id,
@@ -125,3 +151,41 @@ def get_history(session_id: int, db: Session = Depends(get_db)):
             for m in messages
         ],
     )
+
+
+@router.get("", response_model=SessionListResponse)
+def list_sessions(
+    limit: int = 50,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+):
+    sessions = (
+        db.query(ChatSession)
+        .order_by(ChatSession.updated_at.desc(), ChatSession.id.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+
+    out: list[SessionListItem] = []
+    for s in sessions:
+        message_count = (
+            db.query(func.count(ChatMessage.id))
+            .filter(ChatMessage.session_id == s.id)
+            .scalar()
+            or 0
+        )
+
+        out.append(
+            SessionListItem(
+                session_id=s.id,
+                model=s.model,
+                created_at=s.created_at,
+                updated_at=s.updated_at,
+                message_count=int(message_count),
+                total_tokens=int(s.total_tokens),
+                total_cost=float(s.total_cost),
+            )
+        )
+
+    return SessionListResponse(sessions=out)

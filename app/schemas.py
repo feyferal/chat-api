@@ -46,3 +46,17 @@ class SessionHistoryResponse(BaseModel):
     total_tokens: int
     total_cost: float
     messages: list[MessageOut]
+
+
+class SessionListItem(BaseModel):
+    session_id: int
+    model: str
+    created_at: datetime
+    updated_at: datetime
+    message_count: int
+    total_tokens: int
+    total_cost: float
+
+
+class SessionListResponse(BaseModel):
+    sessions: list[SessionListItem]

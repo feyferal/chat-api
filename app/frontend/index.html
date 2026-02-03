@@ -45,10 +45,13 @@
         </div>
 
         <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
-          <select id="model">
+          <select id="sessionSelect" title="Select session"></select>
+
+          <select id="model" title="Model">
             <option value="gpt-4o-mini">gpt-4o-mini</option>
             <option value="gpt-4o">gpt-4o</option>
           </select>
+
           <button id="newSessionBtn">New session</button>
           <button class="secondary" id="refreshBtn">Refresh history</button>
         </div>
@@ -70,11 +73,14 @@
       const sendBtn = document.getElementById("sendBtn");
       const newSessionBtn = document.getElementById("newSessionBtn");
       const refreshBtn = document.getElementById("refreshBtn");
+
       const sessionIdEl = document.getElementById("sessionId");
       const totalCostEl = document.getElementById("totalCost");
       const totalTokensEl = document.getElementById("totalTokens");
       const statusEl = document.getElementById("status");
+
       const modelEl = document.getElementById("model");
+      const sessionSelectEl = document.getElementById("sessionSelect");
 
       let sessionId = null;
 
@@ -94,40 +100,109 @@
         chatEl.innerHTML = "";
       }
 
+      function resetSessionUI() {
+        sessionId = null;
+        sessionIdEl.textContent = "—";
+        totalCostEl.textContent = "$0";
+        totalTokensEl.textContent = "0";
+        clearChat();
+      }
+
+      function renderSessionSelect(sessions) {
+        sessionSelectEl.innerHTML = "";
+
+        const placeholder = document.createElement("option");
+        placeholder.value = "";
+        placeholder.textContent = "— Select session —";
+        sessionSelectEl.appendChild(placeholder);
+
+        for (const s of sessions) {
+          const opt = document.createElement("option");
+          opt.value = String(s.session_id);
+
+          const d = new Date(s.updated_at || s.created_at);
+          const ts = isNaN(d.getTime()) ? "" : d.toLocaleString();
+
+          opt.textContent = `#${s.session_id} · ${ts} · ${s.message_count} msgs`;
+          sessionSelectEl.appendChild(opt);
+        }
+      }
+
+      async function loadSessionsList() {
+        const resp = await fetch("/sessions?limit=50&offset=0");
+        if (!resp.ok) throw new Error(await resp.text());
+        const data = await resp.json();
+        const sessions = data.sessions || [];
+        renderSessionSelect(sessions);
+        return sessions;
+      }
+
       async function createSession() {
         setStatus("Creating session...");
         const model = modelEl.value;
+
         const resp = await fetch("/sessions", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ model })
         });
         if (!resp.ok) throw new Error(await resp.text());
+
         const data = await resp.json();
         sessionId = data.session_id;
+
         sessionIdEl.textContent = String(sessionId);
         totalCostEl.textContent = "$0";
         totalTokensEl.textContent = "0";
         clearChat();
+
+        localStorage.setItem("sessionId", String(sessionId));
         setStatus("Session created.");
+
+        await loadSessionsList();
+        sessionSelectEl.value = String(sessionId);
       }
 
       async function refreshHistory() {
         if (!sessionId) return;
+
         setStatus("Refreshing history...");
         const resp = await fetch(`/sessions/${sessionId}`);
         if (!resp.ok) throw new Error(await resp.text());
+
         const data = await resp.json();
         clearChat();
-        for (const m of data.messages) addMessage(m.role, m.content);
-        totalCostEl.textContent = "$" + String(data.total_cost);
-        totalTokensEl.textContent = String(data.total_tokens);
+
+        for (const m of (data.messages || [])) addMessage(m.role, m.content);
+
+        totalCostEl.textContent = "$" + String(data.total_cost ?? 0);
+        totalTokensEl.textContent = String(data.total_tokens ?? 0);
+
+        if (data.model) modelEl.value = data.model;
+
         setStatus("History updated.");
+      }
+
+      async function selectSession(id) {
+        const n = Number(id);
+
+        if (!n) {
+          resetSessionUI();
+          localStorage.removeItem("sessionId");
+          setStatus("Choose a session or start a new one.");
+          return;
+        }
+
+        sessionId = n;
+        sessionIdEl.textContent = String(sessionId);
+        localStorage.setItem("sessionId", String(sessionId));
+        await refreshHistory();
       }
 
       async function sendMessage() {
         const text = (inputEl.value || "").trim();
         if (!text) return;
+
         if (!sessionId) await createSession();
 
         sendBtn.disabled = true;
@@ -149,15 +224,19 @@
         inputEl.disabled = false;
 
         if (!resp.ok) {
-          const err = await resp.text();
-          setStatus("Error: " + err);
+          setStatus("Error: " + (await resp.text()));
           return;
         }
 
         const data = await resp.json();
         addMessage("assistant", data.assistant_message.content);
-        totalCostEl.textContent = "$" + String(data.session_total_cost);
-        totalTokensEl.textContent = String(data.session_total_tokens);
+
+        totalCostEl.textContent = "$" + String(data.session_total_cost ?? 0);
+        totalTokensEl.textContent = String(data.session_total_tokens ?? 0);
+
+        await loadSessionsList();
+        sessionSelectEl.value = String(sessionId);
+
         setStatus("Done.");
       }
 
@@ -184,9 +263,27 @@
         }
       });
 
-      (async () => {
-        try { await createSession(); }
+      sessionSelectEl.addEventListener("change", async () => {
+        try { await selectSession(sessionSelectEl.value); }
         catch (e) { setStatus("Error: " + e.message); }
+      });
+
+      (async () => {
+        try {
+          resetSessionUI();
+          const sessions = await loadSessionsList();
+
+          const saved = localStorage.getItem("sessionId");
+          if (saved && sessions.some(s => String(s.session_id) === saved)) {
+            sessionSelectEl.value = saved;
+            await selectSession(saved);
+            return;
+          }
+
+          setStatus("Choose a session or start a new one.");
+        } catch (e) {
+          setStatus("Error: " + e.message);
+        }
       })();
     </script>
   </body>
