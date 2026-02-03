@@ -1,14 +1,10 @@
-from __future__ import annotations
-
-from datetime import datetime
-
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..db import get_db
-from ..models import ChatMessage, ChatSession
+from .. import crud
+from ..services.chat_flow import ChatFlowService
 from ..schemas import (
     MessageOut,
     SendMessageRequest,
@@ -19,162 +15,80 @@ from ..schemas import (
     SessionListItem,
     SessionListResponse,
 )
-from ..services.chat_context import build_openai_messages
-from ..services.openai_client import OpenAIClient
-from ..services.pricing import calc_cost_usd
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
 
 @router.post("", response_model=SessionCreateResponse)
-def create_session(payload: SessionCreateRequest, db: Session = Depends(get_db)):
+def create_session(
+        payload: SessionCreateRequest,
+        db: Session = Depends(get_db)
+):
     model = payload.model or settings.default_model
-    s = ChatSession(model=model)
-    db.add(s)
-    db.commit()
-    db.refresh(s)
-    return SessionCreateResponse(session_id=s.id, model=s.model, created_at=s.created_at)
+    session = crud.chat.create_session(db, model)
+
+    return SessionCreateResponse(
+        session_id=session.id,
+        model=session.model,
+        created_at=session.created_at
+    )
 
 
 @router.post("/{session_id}/messages", response_model=SendMessageResponse)
-def send_message(session_id: int, payload: SendMessageRequest, db: Session = Depends(get_db)):
-    s = db.get(ChatSession, session_id)
-    if s is None:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    model = payload.model or s.model
-
-    user_msg = ChatMessage(session_id=s.id, role="user", content=payload.message)
-    db.add(user_msg)
-    db.commit()
-    db.refresh(user_msg)
-
-    history = (
-        db.query(ChatMessage)
-        .filter(ChatMessage.session_id == s.id)
-        .order_by(ChatMessage.id.asc())
-        .all()
-    )
-
-    openai_messages = build_openai_messages(
-        history,
-        system_prompt=settings.system_prompt,
-        limit=settings.context_limit,
-    )
-
-    client = OpenAIClient()
-    reply = client.chat(model=model, messages=openai_messages)
-
-    try:
-        assistant_cost = calc_cost_usd(
-            model=model,
-            prompt_tokens=reply.prompt_tokens,
-            completion_tokens=reply.completion_tokens,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-
-    assistant_msg = ChatMessage(
-        session_id=s.id,
-        role="assistant",
-        content=reply.text,
-        prompt_tokens=reply.prompt_tokens,
-        completion_tokens=reply.completion_tokens,
-        total_tokens=reply.total_tokens,
-        cost=assistant_cost,
-    )
-    db.add(assistant_msg)
-
-    # update session totals
-    s.updated_at = datetime.utcnow()
-    s.model = model
-    s.total_prompt_tokens += reply.prompt_tokens
-    s.total_completion_tokens += reply.completion_tokens
-    s.total_tokens += reply.total_tokens
-    s.total_cost = float(s.total_cost) + float(assistant_cost)
-
-    db.commit()
-    db.refresh(assistant_msg)
-    db.refresh(s)
-
-    out = MessageOut(
-        id=assistant_msg.id,
-        role=assistant_msg.role,
-        content=assistant_msg.content,
-        created_at=assistant_msg.created_at,
-        prompt_tokens=assistant_msg.prompt_tokens,
-        completion_tokens=assistant_msg.completion_tokens,
-        total_tokens=assistant_msg.total_tokens,
-        cost=assistant_msg.cost,
-    )
-
-    return SendMessageResponse(
-        session_id=s.id,
-        assistant_message=out,
-        session_total_cost=s.total_cost,
-        session_total_tokens=s.total_tokens,
-    )
+def send_message(
+        session_id: int,
+        payload: SendMessageRequest,
+        db: Session = Depends(get_db)
+):
+    service = ChatFlowService(db)
+    return service.process_user_message(session_id, payload)
 
 
 @router.get("/{session_id}", response_model=SessionHistoryResponse)
 def get_history(session_id: int, db: Session = Depends(get_db)):
-    s = db.get(ChatSession, session_id)
-    if s is None:
+    session = crud.chat.get_session(db, session_id)
+    if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    messages = (
-        db.query(ChatMessage)
-        .filter(ChatMessage.session_id == s.id)
-        .order_by(ChatMessage.id.asc())
-        .all()
-    )
+    messages = crud.chat.get_session_messages(db, session_id)
+
+    msgs_out = [
+        MessageOut(
+            id=m.id,
+            role=m.role,
+            content=m.content,
+            created_at=m.created_at,
+            prompt_tokens=m.prompt_tokens,
+            completion_tokens=m.completion_tokens,
+            total_tokens=m.total_tokens,
+            cost=m.cost,
+        )
+        for m in messages
+    ]
 
     return SessionHistoryResponse(
-        session_id=s.id,
-        model=s.model,
-        created_at=s.created_at,
-        total_prompt_tokens=s.total_prompt_tokens,
-        total_completion_tokens=s.total_completion_tokens,
-        total_tokens=s.total_tokens,
-        total_cost=s.total_cost,
-        messages=[
-            MessageOut(
-                id=m.id,
-                role=m.role,
-                content=m.content,
-                created_at=m.created_at,
-                prompt_tokens=m.prompt_tokens,
-                completion_tokens=m.completion_tokens,
-                total_tokens=m.total_tokens,
-                cost=m.cost,
-            )
-            for m in messages
-        ],
+        session_id=session.id,
+        model=session.model,
+        created_at=session.created_at,
+        total_prompt_tokens=session.total_prompt_tokens,
+        total_completion_tokens=session.total_completion_tokens,
+        total_tokens=session.total_tokens,
+        total_cost=session.total_cost,
+        messages=msgs_out,
     )
 
 
 @router.get("", response_model=SessionListResponse)
 def list_sessions(
-    limit: int = 50,
-    offset: int = 0,
-    db: Session = Depends(get_db),
+        limit: int = 50,
+        offset: int = 0,
+        db: Session = Depends(get_db),
 ):
-    sessions = (
-        db.query(ChatSession)
-        .order_by(ChatSession.updated_at.desc(), ChatSession.id.desc())
-        .offset(offset)
-        .limit(limit)
-        .all()
-    )
+    sessions = crud.chat.list_sessions(db, limit, offset)
 
     out: list[SessionListItem] = []
     for s in sessions:
-        message_count = (
-            db.query(func.count(ChatMessage.id))
-            .filter(ChatMessage.session_id == s.id)
-            .scalar()
-            or 0
-        )
+        message_count = crud.chat.count_messages_in_session(db, s.id)
 
         out.append(
             SessionListItem(
@@ -182,7 +96,7 @@ def list_sessions(
                 model=s.model,
                 created_at=s.created_at,
                 updated_at=s.updated_at,
-                message_count=int(message_count),
+                message_count=message_count,
                 total_tokens=int(s.total_tokens),
                 total_cost=float(s.total_cost),
             )
